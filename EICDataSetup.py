@@ -37,11 +37,18 @@ import pandas as pd
 # =========================================================
 # USER-LEVEL CONSTANTS
 # =========================================================
+# SimDays = 365
+# SimHours = SimDays * 24
+# HorizonHours = 24
+# DATA_NAME = "EIC_data"
+
+HorizonDays = 2 #added/changed
 SimDays = 365
 SimHours = SimDays * 24
-HorizonHours = 24
+OptDays = 365 - HorizonDays + 1 #added/changed
+HorizonHours = 24*HorizonDays #added/changed
 DATA_NAME = "EIC_data"
-
+PSH_eff = 0.92195
 
 def _script_dir() -> Path:
     """Return the folder containing this script.
@@ -434,6 +441,7 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
     # Read parameters for dispatchable and renewable resources
     # -----------------------------------------------------
     df_gen = _must_read_csv(data_allocation_dir / f"data_genparams_{NN}.csv", header=0)
+    df_PSH = _must_read_csv(data_allocation_dir / f"PSH_gen.csv", header=0) #added/changed
 
     thermal_generators_df = df_gen.loc[
         df_gen["typ"].isin(["coal", "ngcc", "ngct", "oil"])
@@ -442,6 +450,7 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
 
     # Read generation and transmission data
     df_bustounitmap = _must_read_csv(data_allocation_dir / f"gen_mat_{NN}.csv", header=0)
+    df_BustoPSHMap = _must_read_csv(data_allocation_dir / f"PSH_mat.csv", header=0) #added/changed
     df_linetobusmap = _must_read_csv(data_allocation_dir / f"line_to_bus_{NN}_{trans_tag}.csv", header=0)
     df_line_params = _must_read_csv(data_allocation_dir / f"line_params_{NN}_{trans_tag}.csv", header=0)
     lines = list(df_line_params["line"])
@@ -513,6 +522,7 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
         _write_set(f, "Hydro", df_gen.loc[df_gen["typ"] == "hydro", "name"])
         _write_set(f, "Solar", df_gen.loc[df_gen["typ"] == "solar", "name"])
         _write_set(f, "Wind", df_gen.loc[df_gen["typ"] == "wind", "name"])
+        _write_set(f, "PSH", df_PSH.loc[df_PSH["Fuel"] == "PSH", "Name"]) #added/changed
         print("Gen sets")
 
         # Unit outage category sets are intentionally removed.
@@ -535,6 +545,8 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
         f.write("\n\n")
         f.write("param HorizonHours := %d;" % HorizonHours)
         f.write("\n\n")
+        f.write('param OptDays := %d;' % OptDays) #added/changed
+        f.write('\n\n') #added/changed
 
         # Generator parameter matrix
         _write_param_table(f, df_gen, row_name_col="name")
@@ -562,6 +574,60 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
                 value = max(0.0, min(float(value), thermal_gen_capacity))
                 f.write(_ampl_name(z) + "\t" + str(hour) + "\t" + str(value) + "\n")
         f.write(";\n\n")
+
+        # Hourly PSH capacity #added/changed
+        f.write("param:" + "\t" + "SimPSHLimit:=" + "\n")
+        for z in df_PSH[df_PSH["Fuel"] == "PSH"]["Name"]:
+            psh_capacity = float(
+                df_PSH.loc[df_PSH["Name"] == z, "Max_Cap"].values[0]
+            )
+
+            for h in range(SimHours):
+                hour = h + 1
+                f.write(
+                    _ampl_name(z)
+                    + "\t"
+                    + str(hour)
+                    + "\t"
+                    + str(psh_capacity)
+                    + "\n"
+                )
+        f.write(";\n\n")
+
+        # Hourly PSH SoC #added/changed
+        f.write("param:" + "\t" + "SimPSHSoCLimit:=" + "\n")
+        for z in df_PSH[df_PSH["Fuel"] == "PSH"]["Name"]:
+            psh_soc_capacity = float(
+                df_PSH.loc[df_PSH["Name"] == z, "SoC_cap"].values[0]
+            )
+
+            for h in range(SimHours):
+                hour = h + 1
+                f.write(
+                    _ampl_name(z)
+                    + "\t"
+                    + str(hour)
+                    + "\t"
+                    + str(psh_soc_capacity)
+                    + "\n"
+                )
+        f.write(";\n\n")
+
+
+        # PSH Efficiency #added/changed
+        f.write("param:" + "\t" + "PSH_eff:=" + "\n")
+        for z in df_PSH[df_PSH["Fuel"] == "PSH"]["Name"]:
+            f.write(
+                _ampl_name(z)
+                + "\t"
+                + str(PSH_eff)
+                + "\n"
+            )
+        f.write(";\n\n")
+
+
+
+
 
         # Hourly must-run capacity after nuclear outages.
         f.write("param:" + "\t" + "SimMustrunLimit:=" + "\n")
@@ -615,6 +681,7 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
         f.write(";\n\n")
         print("wind")
 
+
         # Daily hydro energy budget
         f.write("param:" + "\t" + "SimHydroDaily:=" + "\n")
         for z in df_hydro_daily.columns:
@@ -623,9 +690,22 @@ def write_eic_data_for_case(context: dict, output_dir: Path) -> Path:
         f.write(";\n\n")
         print("hydro daily")
 
+
+        # # PSH #added/changed
+        # f.write("param:" + "\t" + "set PSH :=" + "\n")
+        # for z in df_PSH.columns:
+        #     for h in range(len(df_PSH)):
+        #         f.write(z + "_PSH" + "\t" + str(h + 1) + "\t" + str(df_PSH.loc[h, z]) + "\n")
+        # f.write(";\n\n")
+        # print("PSH")                
+
+
         # Maps
         _write_matrix_with_row_name(f, "BustoUnitMap", df_bustounitmap, row_col="name")
         print("Bus to units")
+
+        _write_matrix_with_row_name(f, "BustoPSHMap", df_BustoPSHMap, row_col="name") #added/changed
+        print("Bus to PSH")
 
         _write_matrix_with_row_name(f, "LinetoBusMap", df_linetobusmap, row_col="line")
         print("line to bus")

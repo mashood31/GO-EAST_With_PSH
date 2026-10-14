@@ -41,8 +41,8 @@ UC_TREATMENTS = ['_simple']
 # Examples:
 #trans_p  = [-20, -10, 0, 25, 50, 100, 200, 300]
 #trans_MW = [25, 50, 75, 100, 300]
-trans_p = [300]
-trans_MW = []
+trans_p = []
+trans_MW = [100]
 
 # Fuel price processing mode.
 #   'annual'   : use year-specific daily fuel-price files when available
