@@ -16,12 +16,13 @@ model.Gas = Set()
 model.Hydro = Set()
 model.Solar = Set()
 model.Wind = Set()
+model.PSH = Set() #changed/added
 
 #all generators
 model.Thermal = model.Coal | model.Oil | model.Gas
 model.Generators = model.Thermal | model.Hydro | model.Solar | model.Wind
 model.Dispatchable = model.Hydro | model.Oil | model.Gas | model.Coal
-model.Outage = model.Coal | model.Gas | model.Oil
+model.Outage = model.Coal | model.Gas | model.Oil #They have added oil generators as well
 
 # transmission sets
 model.lines = Set() 
@@ -70,6 +71,7 @@ model.LinetoBusMap=Param(model.lines,model.buses)
 model.BustoUnitMap=Param(model.Generators,model.buses)
 model.ExchangeLimit=Param(model.exchanges)
 model.ExchangeMap=Param(model.exchanges,model.lines, mutable=True)
+model.BustoPSHMap=Param(model.PSH,model.buses) #added/changed
 
 # ### Transmission Loss as a %discount on production
 # model.TransLoss = Param(within=NonNegativeReals)
@@ -80,7 +82,8 @@ model.ExchangeMap=Param(model.exchanges,model.lines, mutable=True)
 # ### Minimum spinning reserve as a percent of total reserve
 # model.spin_margin = Param(within=NonNegativeReals)
 
-
+# PSH specific parameters
+model.PSH_eff = Param(model.PSH) #added/changed
 ######=================================================########
 ######               Segment B.5                       ########
 ######=================================================########
@@ -96,7 +99,10 @@ model.SD_periods = RangeSet(1,model.SimDays+1)
 model.HorizonHours = Param(within=PositiveIntegers)
 model.HH_periods = RangeSet(0,model.HorizonHours)
 model.hh_periods = RangeSet(1,model.HorizonHours)
-model.ramp_periods = RangeSet(2,24)
+# model.ramp_periods = RangeSet(2,24)
+model.ramp_periods = RangeSet(2,model.HorizonHours) #added/changed
+model.HorizonDays = Param(within=PositiveIntegers) #added/changed
+model.OptDays = Param(within=PositiveIntegers) #added/changed
 
 ######=================================================########
 ######               Segment B.6                       ########
@@ -120,6 +126,8 @@ model.SimWind = Param(model.Wind, model.SH_periods, within=NonNegativeReals)
 #Lost capacity due to outage
 model.SimGenLimit = Param(model.Outage,model.SH_periods, within=NonNegativeReals)
 model.SimMustrunLimit = Param(model.buses,model.SH_periods, within=NonNegativeReals)
+model.SimPSHLimit = Param(model.PSH,model.SH_periods, within=NonNegativeReals) #added/changed
+model.SimPSHSoCLimit = Param(model.PSH,model.SH_periods, within=NonNegativeReals) #added/changed
 
 #Variable resources over horizon
 #model.HorizonHydro = Param(model.Hydro,within=NonNegativeReals,mutable=True)
@@ -129,6 +137,8 @@ model.HorizonWind = Param(model.Wind,model.hh_periods,within=NonNegativeReals,mu
 #Lost capacity due to outage
 model.HorizonGenLimit = Param(model.Outage,model.hh_periods, within=NonNegativeReals,mutable=True)
 model.HorizonMustrunLimit = Param(model.buses,model.hh_periods, within=NonNegativeReals,mutable=True)
+model.HorizonPSHLimit = Param(model.PSH,model.hh_periods,within=NonNegativeReals,mutable=True) #added/changed
+model.HorizonPSHSoCLimit = Param(model.PSH,model.hh_periods,within=NonNegativeReals,mutable=True) #added/changed
 
 #Fuel prices over simulation period
 model.SimFuelPrice = Param(model.Thermal,model.SD_periods, within=NonNegativeReals)
@@ -159,6 +169,12 @@ model.Theta= Var(model.buses,model.hh_periods)
 #This is created to enforce a penalty on power flows, which prevents slack generation to be transmitted elsewhere in the grid. 
 model.DummyFlow = Var(model.lines,model.hh_periods,initialize=0)
 
+#PSH decision variables #added/changed
+model.PSH_discharge = Var(model.PSH,model.HH_periods, within=NonNegativeReals,initialize=0)
+model.PSH_charge = Var(model.PSH,model.HH_periods, within=NonNegativeReals,initialize=0)
+model.PSH_SoC = Var(model.PSH, model.HH_periods, within=NonNegativeReals, initialize=0)
+
+
 ######=================================================########
 ######               Segment B.8                       ########
 ######=================================================########
@@ -171,8 +187,9 @@ def SysCost(model):
     hydro_cost = sum(model.mwh[j,i]*0.01 for i in model.hh_periods for j in model.Hydro)
     wind_cost = sum(model.mwh[j,i]*0.01 for i in model.hh_periods for j in model.Wind)
     solar_cost = sum(model.mwh[j,i]*0.01 for i in model.hh_periods for j in model.Solar)
+    psh_gen_cost = sum(model.PSH_discharge[j,i] * 0.01 for i in model.hh_periods for j in model.PSH) #changed/added
     powerflow_cost = sum(model.DummyFlow[l,i]*0.01 for l in model.lines for i in model.hh_periods)
-    return gen + slack + hydro_cost + wind_cost + solar_cost + powerflow_cost
+    return gen + slack + hydro_cost + wind_cost + solar_cost + powerflow_cost + psh_gen_cost #changed/added
 
 model.SystemCost = Objective(rule=SysCost, sense=minimize)
 
@@ -235,6 +252,35 @@ def WindC(model,j,i):
     return  model.mwh[j,i] <= model.HorizonWind[j,i]    
 model.WindConstraint= Constraint(model.Wind,model.hh_periods,rule=WindC)
 
+#PSH Constraints #changed/added
+
+#SoC Constraint, state of charge is always <= the psh capacity
+def PSH1(model,j,i):
+    SoC = model.PSH_SoC[j,i]
+    SoC_Cap = model.HorizonPSHSoCLimit[j,i]
+    return SoC <= SoC_Cap
+model.PSHConstraint1 = Constraint(model.PSH,model.hh_periods,rule=PSH1)
+
+#SoC Power Balance Constraint, keeps state of charge in balance after charging and discharging
+def PSH2(model,j,i):
+    SoC = model.PSH_SoC[j,i]
+    SoC_tm1 = model.PSH_SoC[j,i-1]
+    Charge = model.PSH_charge[j,i]
+    Discharge = model.PSH_discharge[j,i]
+    return SoC == SoC_tm1 + Charge*model.PSH_eff[j] - Discharge/model.PSH_eff[j]
+model.PSH2 = Constraint(model.PSH, model.hh_periods, rule=PSH2)
+
+#Rate of Charge Constraint, total charge in one time step <= charge rate per hour
+def PSH3(model,j,i):
+    Charge = model.PSH_charge[j,i]
+    return Charge <= model.HorizonPSHLimit[j,i] 
+model.PSH3 = Constraint(model.PSH, model.hh_periods, rule=PSH3)
+
+#Rate of Discharge Constraint, total discharge in one time step <= discharge rate per hour
+def PSH4(model,j,i):
+    Discharge = model.PSH_discharge[j,i]
+    return Discharge <= model.HorizonPSHLimit[j,i]
+model.PSH4 = Constraint(model.PSH, model.hh_periods, rule=PSH4)
 
 ######=================================================########
 ######               Segment B.11.1                    ########
@@ -245,7 +291,9 @@ def Nodal_Balance(model,z,i):
     gen = sum(model.mwh[j,i]*model.BustoUnitMap[j,z] for j in model.Generators)    
     slack = model.S[z,i]
     must_run = model.HorizonMustrunLimit[z,i]
-    return gen + slack + must_run - power_flow == model.HorizonDemand[z,i] 
+    charge = sum(model.PSH_charge[j,i] * model.BustoPSHMap[j,z] for j in model.PSH) #changed/added
+    discharge = sum(model.PSH_discharge[j,i] * model.BustoPSHMap[j,z] for j in model.PSH) #changed/added
+    return gen + slack + must_run - power_flow + discharge == charge + model.HorizonDemand[z,i]  #changed/added
 model.Node_Constraint = Constraint(model.buses,model.hh_periods,rule=Nodal_Balance)
 
 def Flow_line(model,l,i):

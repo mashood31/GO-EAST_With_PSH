@@ -53,15 +53,14 @@ import pyomo.environ as pyo
 # BASIC SETTINGS
 # =========================================================
 SOLVE_WINDOWS = [
-    (1, 100),
-    (101, 100),
-    (201, 100),
-    (301, 65),
+    (1, 365)
 ]
 
-Solvername = "gurobi"
+# Solvername = "gurobi"
+Solvername = "gurobi_direct" #added/changed
 Timelimit = 14400  # seconds per daily solve
-Threadlimit = 2
+# Threadlimit = 2
+Threadlimit = int(os.environ.get("SLURM_CPUS_PER_TASK", 2)) #added/changed
 
 logging.getLogger("pyomo.core").setLevel(logging.ERROR)
 
@@ -204,6 +203,7 @@ args = _parse_args()
 win = args.win
 win_start, win_len = SOLVE_WINDOWS[win]
 win_end = win_start + win_len - 1
+# win_end = min(win_start + win_len - 1,int(instance.OptDays.value)) #changed/added
 out_suffix = f"win{win}"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -243,7 +243,7 @@ instance.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 opt = SolverFactory(Solvername)
 if Solvername == "cplex":
     opt.options["timelimit"] = Timelimit
-elif Solvername == "gurobi":
+elif Solvername == "gurobi_direct": #changed/added
     opt.options["TimeLimit"] = Timelimit
     opt.options["DualReductions"] = 0
     # opt.options["MIPFocus"] = 1
@@ -289,14 +289,24 @@ slack = []
 vlt_angle = []
 duals = []
 objective_values = []
+PSH_charge = [] #added/changed
+PSH_discharge = [] #added/changed
+PSH_SoC = [] #added/changed
 
-
+#To start each season with empty reservoir #added/changed
+for j in instance.PSH:
+    instance.PSH_SoC[j,0] = 0
+    instance.PSH_SoC[j,0].fixed = True
 
 # =========================================================
 # WINDOW SOLVE LOOP
 # =========================================================
-for day in range(win_start, win_start + win_len):
-    print(f"\n=== Solving day {day} of window {win_start}-{win_end} ===")
+last_day = min(win_start + win_len - 1, int(instance.OptDays.value)) #changed/added
+
+for day in range(win_start, last_day + 1): #changed/added
+
+# for day in range(win_start, win_start + win_len):
+    print(f"\n=== Solving day {day} of window {win_start}-{last_day} ===") #changed/added
 
     # Load demand time series into the 24-hour horizon.
     for z in instance.buses:
@@ -311,6 +321,16 @@ for day in range(win_start, win_start + win_len):
             hour = (day - 1) * 24 + i
             instance.HorizonMustrunLimit[z, i] = _safe_get_param(
                 instance.SimMustrunLimit, (z, hour), default=0.0
+            )
+    for z in instance.PSH: #added/changed
+        for i in K:
+            hour = (day-1)*24 + i
+            instance.HorizonPSHLimit[z,i] = _safe_get_param(
+                instance.SimPSHLimit, (z, hour), default=0.0
+            )
+
+            instance.HorizonPSHSoCLimit[z,i] = _safe_get_param(
+                instance.SimPSHSoCLimit, (z, hour), default=0.0
             )
 
     # Load daily hydro energy budget.
@@ -405,6 +425,20 @@ for day in range(win_start, win_start + win_len):
                     elif index[0] in instance.Wind:
                         mwh.append((index[0], "Wind", index[1] + ((day - 1) * 24), varobject[index].value))
 
+        
+        if a == "PSH_charge":
+            for index in varobject:
+                if int(index[1] > 0 and index[1] < 25):
+                    PSH_charge.append((index[0],index[1]+((day-1)*24),varobject[index].value))
+        if a=='PSH_discharge':  
+            for index in varobject:
+                if int(index[1]>0 and index[1]<25):
+                    PSH_discharge.append((index[0],index[1]+((day-1)*24),varobject[index].value))
+        if a=='PSH_SoC':  
+            for index in varobject:
+                if int(index[1]>0 and index[1]<25):
+                    PSH_SoC.append((index[0],index[1]+((day-1)*24),varobject[index].value))
+
         if a == "on":
             for index in varobject:
                 if int(index[1] > 0 and index[1] < 25):
@@ -433,6 +467,13 @@ for day in range(win_start, win_start + win_len):
                 newval_1 = instance.mwh[j, 24].value
             instance.mwh[j, 0] = newval_1
             instance.mwh[j, 0].fixed = True
+        for j in instance.PSH: #added/changed
+            if instance.PSH_SoC[j,24].value <=0 and instance.PSH_SoC[j,24].value>= -0.0001:
+                newval_1=0
+            else:
+                newval_1=instance.PSH_SoC[j,24].value
+            instance.PSH_SoC[j,0] = newval_1
+            instance.PSH_SoC[j,0].fixed = True
 
     print(day)
 
@@ -442,6 +483,9 @@ for day in range(win_start, win_start + win_len):
 # =========================================================
 vlt_angle_pd = pd.DataFrame(vlt_angle, columns=("Node", "Time", "Value"))
 mwh_pd = pd.DataFrame(mwh, columns=("Generator", "Type", "Time", "Value"))
+PSH_charge_pd=pd.DataFrame(PSH_charge,columns=('PSH_Generator','Time','Value')) #added/changed
+PSH_discharge_pd=pd.DataFrame(PSH_discharge,columns=('PSH_Generator','Time','Value')) #added/changed
+PSH_SoC_pd=pd.DataFrame(PSH_SoC,columns=('PSH_Generator','Time','Value')) #added/changed
 # on_pd = pd.DataFrame(on, columns=("Generator", "Time", "Value"))
 # switch_pd = pd.DataFrame(switch, columns=("Generator", "Time", "Value"))
 # srsv_pd = pd.DataFrame(srsv, columns=("Generator", "Time", "Value"))
@@ -453,6 +497,9 @@ df_objective = pd.DataFrame(objective_values, columns=["Day", "ObjectiveValue"])
 
 
 _safe_write(mwh_pd, SCRIPT_DIR / f"mwh_{out_suffix}.csv")
+_safe_write(PSH_charge_pd, SCRIPT_DIR / f"PSH_charge_{out_suffix}.csv")
+_safe_write(PSH_discharge_pd, SCRIPT_DIR / f"PSH_discharge_{out_suffix}.csv")
+_safe_write(PSH_SoC_pd,SCRIPT_DIR / f"PSH_SoC_{out_suffix}.csv")
 _safe_write(vlt_angle_pd, SCRIPT_DIR / f"vlt_angle_{out_suffix}.csv")
 # _safe_write(on_pd, SCRIPT_DIR / f"on_{out_suffix}.csv")
 # _safe_write(switch_pd, SCRIPT_DIR / f"switch_{out_suffix}.csv")
@@ -463,4 +510,4 @@ _safe_write(flow_pd, SCRIPT_DIR / f"flow_{out_suffix}.csv")
 _safe_write(duals_pd, SCRIPT_DIR / f"duals_{out_suffix}.csv")
 _safe_write(df_objective, SCRIPT_DIR / f"objective_values_{out_suffix}.csv")
 
-print(f"Complete window {win}: {win_start}-{win_end}")
+print(f"Complete window {win}: {win_start}-{last_day}") #changed/added
