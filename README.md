@@ -15,3 +15,8 @@ After downloading, place them under:
 GO-EAST/Data/Gen/
 
 GO-EAST/Data/Raw_Data/
+
+Copy PSH_gen.csv and PSH_mat.csv to the Data/data_allocation folder after running EICDataSetup.py. 
+To change the attributes of the PSH, make changes to the PSH_gen.csv file. 
+The cycle time configurations used for this study are listed in PSH_Cycle_Time_Configurations.csv file. 
+To change the PSH node, make changes to the PSH_mat.csv file.
